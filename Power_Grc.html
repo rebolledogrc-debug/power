@@ -1,1 +1,214 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rotador Power BI — TV (auto-precarga + auto-fullscreen, 40s por defecto)</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height:100%; }
+  body { margin:0; background:#0b0b0b; color:#eaeaea; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif }
+  .toolbar {
+    position: fixed; inset: auto 0 0 0; display:flex; gap:8px; align-items:center;
+    padding:10px 12px; background:rgba(0,0,0,.35); backdrop-filter: blur(4px);
+    z-index: 10; transition: opacity .6s ease;
+  }
+  .toolbar.hidden { opacity:0; pointer-events:none; }
+  .toolbar button, .toolbar input {
+    font-size:14px; padding:8px 12px; border-radius:10px; border:0; background:#1f2937; color:#e5e7eb;
+  }
+  .toolbar button:hover { background:#374151; cursor:pointer; }
+  .toolbar .spacer { flex: 1 1 auto; }
+  .stage {
+    position:fixed; inset:0 0 46px 0;
+    display:grid; place-items:stretch; background:#000;
+  }
+  iframe { width:100%; height:100%; border:0; }
+  .hiddenFrame { opacity:0; pointer-events:none; }
+  .badge { font-size:12px; opacity:.9; }
+  button.activeBtn { background:#16a34a !important; color:#fff !important; }
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <iframe id="frame" allow="fullscreen"></iframe>
+</div>
+
+<div class="toolbar" id="toolbar">
+  <button id="btnStart">▶ Iniciar</button>
+  <button id="btnStop">⏹ Detener</button>
+  <button id="btnPrev">⏮ Anterior</button>
+  <button id="btnNext">⏭ Siguiente</button>
+  <span class="spacer"></span>
+  <label>Intervalo (s): <input id="interval" type="number" min="5" value="40" style="width:80px;"></label>
+  <button id="btnFS">⛶ Pantalla completa</button>
+  <span id="status" class="badge">Listo</span>
+</div>
+
+<script>
+const BASE_EMBED = "https://app.powerbi.com/reportEmbed?reportId=285e6d44-98ae-4345-8965-99f0e34d692b&autoAuth=true&ctid=77ecda75-5864-422a-a535-6ea67154029c";
+const CHROMELESS = "&navContentPaneEnabled=false&toolbarHidden=true";
+
+// Pega aquí tus URLs completas de cada pestaña (/reports/.../<pageId>)
+const rawPages = [
+  " https://app.powerbi.com/groups/7c24425a-2e64-49a6-8da6-d8cc08320c48/reports/285e6d44-98ae-4345-8965-99f0e34d692b/1192c872f827c757defb?ctid=77ecda75-5864-422a-a535-6ea67154029c&experience=power-bi",
+  " https://app.powerbi.com/groups/7c24425a-2e64-49a6-8da6-d8cc08320c48/reports/285e6d44-98ae-4345-8965-99f0e34d692b/d48635165d279885b406?ctid=77ecda75-5864-422a-a535-6ea67154029c&experience=power-bi",
+  " https://app.powerbi.com/groups/7c24425a-2e64-49a6-8da6-d8cc08320c48/reports/285e6d44-98ae-4345-8965-99f0e34d692b/8047c9f5348062b243f8?ctid=77ecda75-5864-422a-a535-6ea67154029c&experience=power-bi",
+  " https://app.powerbi.com/groups/7c24425a-2e64-49a6-8da6-d8cc08320c48/reports/285e6d44-98ae-4345-8965-99f0e34d692b/6101e94a48af185afa48?ctid=77ecda75-5864-422a-a535-6ea67154029c&experience=power-bi",
+  " https://app.powerbi.com/groups/7c24425a-2e64-49a6-8da6-d8cc08320c48/reports/285e6d44-98ae-4345-8965-99f0e34d692b/deb2533f8b5f12592f6d?ctid=77ecda75-5864-422a-a535-6ea67154029c&experience=power-bi",
+  " https://app.powerbi.com/groups/7c24425a-2e64-49a6-8da6-d8cc08320c48/reports/285e6d44-98ae-4345-8965-99f0e34d692b/f8cc841c71e12a34fe77?ctid=77ecda75-5864-422a-a535-6ea67154029c&experience=power-bi",
+  " https://app.powerbi.com/groups/7c24425a-2e64-49a6-8da6-d8cc08320c48/reports/285e6d44-98ae-4345-8965-99f0e34d692b/2ee13a1c2ca7c0ece642?ctid=77ecda75-5864-422a-a535-6ea67154029c&experience=power-bi"
+];
+
+function extractPageId(url) {
+  const clean = (url || "").trim();
+  const m = clean.match(/\/reports\/[0-9a-f-]+\/([0-9a-f]+)(?:\?|$)/i);
+  return m ? m[1] : null;
+}
+function toEmbedUrlFromFullUrl(fullUrl) {
+  const pageId = extractPageId(fullUrl);
+  if (!pageId) return fullUrl.trim();
+  return `${BASE_EMBED}&pageName=${pageId}${CHROMELESS}`;
+}
+const urls = rawPages.map(toEmbedUrlFromFullUrl);
+
+const frame = document.getElementById("frame");
+const statusEl = document.getElementById("status");
+const intervalInput = document.getElementById("interval");
+const toolbar = document.getElementById("toolbar");
+
+let idx = 0;
+let timer = null;
+let preloaded = new Array(urls.length).fill(false);
+let autoHideToolbar = true; // oculta la barra tras iniciar
+
+// Cargar intervalo desde localStorage si existe
+(function initInterval(){
+  const saved = localStorage.getItem("pbi_rotador_interval_s");
+  if (saved && !isNaN(parseInt(saved))) {
+    intervalInput.value = saved;
+  } else {
+    intervalInput.value = "40";
+  }
+})();
+
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+function getIntervalMs(){
+  const val = parseInt(intervalInput.value, 10);
+  const s = isNaN(val) ? 40 : Math.max(5, val); // por defecto 40, mínimo 5
+  localStorage.setItem("pbi_rotador_interval_s", s);
+  return s * 1000;
+}
+
+function markActive(btnId){
+  ["btnStart","btnStop"].forEach(id=>{
+    const el = document.getElementById(id);
+    if (el) el.classList.remove("activeBtn");
+  });
+  if (btnId) {
+    const el = document.getElementById(btnId);
+    if (el) el.classList.add("activeBtn");
+  }
+}
+
+async function preloadSequential() {
+  statusEl.textContent = "Calentando sesión…";
+  frame.classList.add("hiddenFrame");
+  frame.src = "https://app.powerbi.com/?noSignUpCheck=1";
+  await sleep(1200);
+
+  for (let i = 0; i < urls.length; i++) {
+    statusEl.textContent = `Precargando ${i+1}/${urls.length}…`;
+    await loadInFrame(urls[i]);
+    preloaded[i] = true;
+    await sleep(150);
+  }
+
+  frame.classList.remove("hiddenFrame");
+  statusEl.textContent = `Precarga completa: ${preloaded.filter(Boolean).length}/${urls.length}`;
+  show(0);
+}
+
+function loadInFrame(u) {
+  return new Promise((resolve) => {
+    const onLoad = () => { frame.removeEventListener('load', onLoad); resolve(true); };
+    const onError = () => { frame.removeEventListener('error', onError); resolve(false); };
+    frame.addEventListener('load', onLoad, { once:true });
+    frame.addEventListener('error', onError, { once:true });
+    frame.src = u;
+  });
+}
+
+function show(i) {
+  idx = (i + urls.length) % urls.length;
+  frame.src = urls[idx];
+  statusEl.textContent = `Mostrando ${idx+1}/${urls.length}${preloaded[idx] ? ' (precargada)' : ''}`;
+}
+
+async function requestFullscreen() {
+  try {
+    const el = document.documentElement;
+    if (!document.fullscreenElement && el.requestFullscreen) {
+      await el.requestFullscreen();
+    }
+  } catch (e) { /* algunos navegadores requieren interacción */ }
+}
+
+async function start() {
+  stop();
+  markActive("btnStart");
+  await requestFullscreen();
+  await preloadSequential();
+  timer = setInterval(() => show(idx + 1), getIntervalMs());
+  statusEl.textContent = `Rotando cada ${getIntervalMs()/1000}s — ${idx+1}/${urls.length}`;
+  if (autoHideToolbar) {
+    setTimeout(()=> toolbar.classList.add("hidden"), 2000);
+  }
+}
+
+function stop() {
+  if (timer) { clearInterval(timer); timer = null; }
+  markActive("btnStop");
+  statusEl.textContent = `Detenido — ${idx+1}/${urls.length}`;
+  toolbar.classList.remove("hidden");
+}
+
+async function enterFullscreen() { await requestFullscreen(); }
+
+// Al cambiar el selector de intervalo, reinicia el temporizador si está en marcha
+intervalInput.addEventListener("change", () => {
+  localStorage.setItem("pbi_rotador_interval_s", parseInt(intervalInput.value || "40", 10));
+  if (timer) {
+    clearInterval(timer);
+    timer = setInterval(() => show(idx + 1), getIntervalMs());
+    statusEl.textContent = `Rotando cada ${getIntervalMs()/1000}s — ${idx+1}/${urls.length}`;
+  }
+});
+
+// Mostrar/ocultar toolbar al mover el mouse
+let hideHandle = null;
+window.addEventListener('mousemove', () => {
+  if (!autoHideToolbar) return;
+  toolbar.classList.remove("hidden");
+  clearTimeout(hideHandle);
+  hideHandle = setTimeout(()=> toolbar.classList.add("hidden"), 1800);
+});
+
+document.getElementById("btnStart").onclick = start;
+document.getElementById("btnStop").onclick  = stop;
+document.getElementById("btnPrev").onclick  = () => { stop(); show(idx - 1); };
+document.getElementById("btnNext").onclick  = () => { stop(); show(idx + 1); };
+document.getElementById("btnFS").onclick    = enterFullscreen;
+
+// Auto-inicio al cargar la página
+window.addEventListener('DOMContentLoaded', () => {
+  start();
+});
+
+// Primera carga visible
+show(0);
+</script>
+</body>
+</html>
 
